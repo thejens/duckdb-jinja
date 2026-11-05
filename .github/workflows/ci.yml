@@ -12,6 +12,8 @@ jobs:
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # A deadlock in the extension shows up as a hung test; fail it quickly.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
