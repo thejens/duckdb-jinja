@@ -1,0 +1,35 @@
+[package]
+name = "duckdb-jinja"
+version = "0.1.0"
+edition = "2024"
+description = "Jinja2 templates in DuckDB: a loadable extension that renders templates from SQL with row data, JSON and STRUCT values and stored templates, powered by MiniJinja."
+license = "MIT"
+repository = "https://github.com/thejens/duckdb-jinja"
+readme = "README.md"
+keywords = ["duckdb", "jinja2", "template", "duckdb-extension", "minijinja"]
+categories = ["database", "template-engine"]
+
+[lib]
+# The loadable extension. DuckDB loads it by the file name `jinja`, after
+# scripts/package.py appends the metadata footer DuckDB requires.
+crate-type = ["cdylib"]
+name = "duckdb_jinja"
+
+[dependencies]
+# DuckDB's stable C extension API (v1), called through the function table
+# DuckDB hands over on load: nothing is linked, and one binary loads into
+# every DuckDB release that supports C API v1.5.6.
+libduckdb-sys = { version = "=1.20000.1", default-features = false, features = ["loadable-extension"] }
+thread_local = "1.1.10"
+lru = "0.19.0"
+minijinja = { version = "3.0.5", features = ["json", "fuel", "loop_controls", "urlencode", "unicode", "preserve_order", "serde"] }
+minijinja-contrib = { version = "3.0.5", features = ["datetime", "pycompat"] }
+serde_json = "1.0.154"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# rustc strips release debuginfo by default; on macOS 27 / ld-27037 the
+# stripped dylib is rejected by dyld ("mis-aligned LINKEDIT string pool").
+strip = false

@@ -1,0 +1,72 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the extension for each platform and
+# attaches the archives to a GitHub release for that tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 for an older glibc baseline (2.35), so the extension
+          # loads on more distributions.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, platform: linux_amd64, lib: libduckdb_jinja.so }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, platform: linux_arm64, lib: libduckdb_jinja.so }
+          - { os: macos-15, target: aarch64-apple-darwin, platform: osx_arm64, lib: libduckdb_jinja.dylib }
+          - { os: macos-15, target: x86_64-apple-darwin, platform: osx_amd64, lib: libduckdb_jinja.dylib }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, platform: windows_amd64, lib: duckdb_jinja.dll }
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          name="duckdb-jinja-${GITHUB_REF_NAME}-${{ matrix.platform }}"
+          python scripts/package.py "target/${{ matrix.target }}/release/${{ matrix.lib }}" --platform ${{ matrix.platform }} --out-dir "$name"
+          cp README.md LICENSE "$name/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: duckdb-jinja-*.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes duckdb-jinja-*
