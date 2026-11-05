@@ -208,7 +208,10 @@ class StoredTest(unittest.TestCase):
 
     def test_recursive_rendering_is_refused(self):
         conn = connect()
-        conn.execute("CREATE TABLE t (name VARCHAR, source VARCHAR)")
+        # Enough rows that DuckDB scans the view on several threads, so the
+        # nested call can run on a thread other than the outer render's.
+        conn.execute("SET threads = 8")
+        conn.execute("CREATE TABLE t AS SELECT 'n' || i AS name, 'x' AS source FROM range(500000) r(i)")
         conn.execute("INSERT INTO t VALUES ('a', 'A'), ('b', 'B')")
         conn.execute(
             "CREATE VIEW jinja_templates AS SELECT name, CASE WHEN name = 'b' "

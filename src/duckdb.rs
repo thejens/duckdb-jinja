@@ -118,7 +118,13 @@ impl Column {
 
 /// State a function keeps for the duration of one query on one thread,
 /// created by DuckDB's per-query init callback.
-pub type QueryState = Mutex<std::collections::HashSet<String>>;
+#[derive(Default)]
+pub struct QueryState {
+    /// Stored templates this query has already verified on this thread.
+    pub verified: Mutex<std::collections::HashSet<String>>,
+    /// The id of the connection running the query, when DuckDB gives it.
+    pub connection_id: Option<u64>,
+}
 
 type Callback = dyn Fn(&Row<'_>, &QueryState) -> Result<Output, String> + Send + Sync;
 
@@ -169,7 +175,11 @@ impl Function {
 /// A connection the extension opened itself, to the database that loaded
 /// it. DuckDB connections are not safe for concurrent use, so every use
 /// goes through the mutex.
-pub struct Connection(Mutex<ffi::duckdb_connection>);
+pub struct Connection {
+    conn: Mutex<ffi::duckdb_connection>,
+    /// DuckDB's id for this connection, to recognise queries it runs.
+    id: Option<u64>,
+}
 
 // SAFETY: the handle is only used under the mutex.
 unsafe impl Send for Connection {}
@@ -186,12 +196,27 @@ impl Connection {
         if unsafe { ffi::duckdb_connect(db, &mut conn) } != ffi::duckdb_state_DuckDBSuccess {
             return Err("could not open a connection to the database".into());
         }
-        Ok(Connection(Mutex::new(conn)))
+        // SAFETY: `conn` was just opened; the context is destroyed by
+        // `connection_id`.
+        let id = unsafe {
+            let mut ctx: ffi::duckdb_client_context = ptr::null_mut();
+            ffi::duckdb_connection_get_client_context(conn, &mut ctx);
+            connection_id(ctx)
+        };
+        Ok(Connection {
+            conn: Mutex::new(conn),
+            id,
+        })
+    }
+
+    /// DuckDB's id for this connection.
+    pub fn id(&self) -> Option<u64> {
+        self.id
     }
 
     /// Registers `function` with all its overloads.
     pub fn register(&self, function: Function) -> Result<(), String> {
-        let conn = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         // SAFETY: every handle below is created here and handed to DuckDB,
         // which copies what it keeps; the extra info boxes are owned by
         // DuckDB from then on and freed through `drop_overload`.
@@ -234,7 +259,7 @@ impl Connection {
     /// of its first row as text, or `None` when there is no row or it is
     /// NULL.
     pub fn query_text(&self, sql: &CStr, param: &str) -> Result<Option<String>, String> {
-        let conn = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let param =
             CString::new(param).map_err(|_| "a parameter contains a NUL byte".to_owned())?;
         // SAFETY: the connection is open; every handle is destroyed before
@@ -284,7 +309,7 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        let conn = self.0.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
         // SAFETY: opened by duckdb_connect and not used after this.
         unsafe { ffi::duckdb_disconnect(conn) };
     }
@@ -308,9 +333,35 @@ unsafe extern "C" fn drop_query_state(p: *mut c_void) {
     drop(unsafe { Box::from_raw(p.cast::<QueryState>()) });
 }
 
+/// The connection id of a client context, which this destroys.
+///
+/// # Safety
+/// `ctx` must be null or a client context DuckDB handed out.
+unsafe fn connection_id(mut ctx: ffi::duckdb_client_context) -> Option<u64> {
+    if ctx.is_null() {
+        return None;
+    }
+    // SAFETY: per this function's contract.
+    unsafe {
+        let id = ffi::duckdb_client_context_get_connection_id(ctx);
+        ffi::duckdb_destroy_client_context(&mut ctx);
+        Some(id)
+    }
+}
+
 /// DuckDB's per-query, per-thread init: a fresh [`QueryState`].
 unsafe extern "C" fn init_query_state(info: ffi::duckdb_init_info) {
-    let state = Box::into_raw(Box::new(QueryState::default()));
+    // SAFETY: `info` is the init info of this call; `connection_id`
+    // destroys the context.
+    let connection_id = unsafe {
+        let mut ctx: ffi::duckdb_client_context = ptr::null_mut();
+        ffi::duckdb_scalar_function_init_get_client_context(info, &mut ctx);
+        connection_id(ctx)
+    };
+    let state = Box::into_raw(Box::new(QueryState {
+        connection_id,
+        ..QueryState::default()
+    }));
     // SAFETY: `info` is the init info of this call; DuckDB frees the state
     // through `drop_query_state` when the query ends.
     unsafe {

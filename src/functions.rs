@@ -157,7 +157,7 @@ fn render_inline(state: &Jinja, row: &Row<'_>) -> Result<Output, String> {
 fn render_named(
     state: &Jinja,
     row: &Row<'_>,
-    verified: &crate::duckdb::QueryState,
+    query: &crate::duckdb::QueryState,
 ) -> Result<Output, String> {
     if matches!(row.arg(0), Arg::Null) {
         return Ok(Output::Null);
@@ -165,7 +165,16 @@ fn render_named(
     let name = text_arg(row, 0, "name")?;
     let context = context_arg(row, 1, "jinja_render_named")?;
     let strict = flag_arg(row, 2);
-    let mut seen = verified.lock().unwrap_or_else(|p| p.into_inner());
+    // A query on the extension's own connection is one loading a template,
+    // so this call is a render nested inside a render, for example when
+    // `jinja_templates` is a view that calls `jinja_render_named`. Its
+    // lookup would wait for the connection the outer render holds; when
+    // DuckDB runs it on another thread, the thread-local check in
+    // `engines` cannot see that, so it is caught here.
+    if query.connection_id.is_some() && query.connection_id == state.conn.id() {
+        return Err("jinja: recursive rendering is not supported".into());
+    }
+    let mut seen = query.verified.lock().unwrap_or_else(|p| p.into_inner());
     let out = state.engines()?.stored[strict as usize]
         .render(name, context, state.fuel(), seen.contains(name))
         .map_err(|e| format!("rendering template {name:?} failed: {e}"))?;
